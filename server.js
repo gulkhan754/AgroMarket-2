@@ -1,0 +1,42 @@
+'use strict';
+const express=require('express');
+const session=require('express-session');
+const bcrypt=require('bcryptjs');
+const fs=require('fs');
+const path=require('path');
+const crypto=require('crypto');
+const app=express();
+const dbFile=path.join(__dirname,'data','users.json');
+const ordersFile=path.join(__dirname,'data','orders.json');
+const read=(file)=>{try{return JSON.parse(fs.readFileSync(file,'utf8'))}catch{return []}};
+const save=(file,data)=>fs.writeFileSync(file,JSON.stringify(data,null,2));
+app.use(express.json({limit:'20kb'}));
+app.use(session({secret:process.env.SESSION_SECRET||'local-demo-change-this-secret-before-deploying',resave:false,saveUninitialized:false,cookie:{httpOnly:true,sameSite:'lax',secure:false,maxAge:1000*60*60*24}}));
+app.post('/api/register',async(req,res)=>{
+ const {name,email,password}=req.body||{};
+ if(typeof name!=='string'||name.trim().length<2||name.length>80||typeof email!=='string'||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||typeof password!=='string'||password.length<8||password.length>72)return res.status(400).json({error:'Атыңызды, дұрыс email және кемінде 8 таңбалы құпиясөз енгізіңіз.'});
+ const users=read(dbFile);const normalized=email.trim().toLowerCase();
+ if(users.some(u=>u.email===normalized))return res.status(409).json({error:'Бұл email тіркелген.'});
+ const user={id:crypto.randomUUID(),name:name.trim(),email:normalized,passwordHash:await bcrypt.hash(password,10)};
+ users.push(user);save(dbFile,users);req.session.userId=user.id;res.json({user:{id:user.id,name:user.name,email:user.email}});
+});
+app.post('/api/login',async(req,res)=>{
+ const {email,password}=req.body||{};const user=read(dbFile).find(u=>u.email===String(email||'').trim().toLowerCase());
+ if(!user||typeof password!=='string'||!await bcrypt.compare(password,user.passwordHash))return res.status(401).json({error:'Email немесе құпиясөз қате.'});
+ req.session.regenerate(err=>{if(err)return res.status(500).json({error:'Сервер қатесі'});req.session.userId=user.id;res.json({user:{id:user.id,name:user.name,email:user.email}})});
+});
+app.get('/api/me',(req,res)=>{const u=read(dbFile).find(x=>x.id===req.session.userId);res.json({user:u?{id:u.id,name:u.name,email:u.email}:null})});
+app.post('/api/logout',(req,res)=>req.session.destroy(()=>res.json({ok:true})));
+app.get('/api/orders',(req,res)=>{if(!req.session.userId)return res.status(401).json({error:'Кіру қажет'});res.json(read(ordersFile).filter(o=>o.userId===req.session.userId).map(({userId,...o})=>o))});
+app.post('/api/orders',(req,res)=>{
+ if(!req.session.userId)return res.status(401).json({error:'Алдымен жүйеге кіріңіз.'});
+ const incoming=req.body?.items;
+ if(!Array.isArray(incoming)||incoming.length===0||incoming.length>50||incoming.some(x=>!Number.isInteger(Number(x.id))||!Number.isInteger(x.quantity)||x.quantity<1||x.quantity>99))return res.status(400).json({error:'Себет деректері дұрыс емес.'});
+ const products=read(path.join(__dirname,'db.json')).products;
+ const items=incoming.map(x=>{const p=products.find(p=>Number(p.id)===Number(x.id));return p?{id:p.id,name:p.name,price:p.price,quantity:x.quantity}:null});
+ if(items.some(x=>!x))return res.status(400).json({error:'Тауар табылмады.'});
+ const order={id:crypto.randomUUID().slice(0,8).toUpperCase(),userId:req.session.userId,createdAt:new Date().toISOString(),items,total:items.reduce((s,x)=>s+x.price*x.quantity,0),status:'Қабылданды (демо)'};
+ const orders=read(ordersFile);orders.push(order);save(ordersFile,orders);res.json({order:{id:order.id,total:order.total}});
+});
+app.use(express.static(path.join(__dirname,'public')));
+app.listen(3000,()=>console.log('AgroMarket: http://localhost:3000'));
